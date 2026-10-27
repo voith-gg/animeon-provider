@@ -75,7 +75,15 @@ class AnimeOnProvider : MainAPI() {
         return try {
             val json = app.get("$mainUrl/api/search?q=${query.encodeUri()}").text
             val data = tryParseJson<SearchApiResponse>(json)
-            val items = data?.results?.mapNotNull { it.toSearchResponse(mainUrl) } ?: emptyList()
+            val items = data?.results?.mapNotNull { item ->
+                val animeSlug = item.anime_url ?: return@mapNotNull null
+                val posterFull = item.poster?.let {
+                    if (it.startsWith("http")) it else "$mainUrl$it"
+                }
+                newMovieSearchResponse(item.title, "$mainUrl/anime/$animeSlug", TvType.Anime) {
+                    posterUrl = posterFull
+                }
+            } ?: emptyList()
             newSearchResponseList(items, items.isNotEmpty())
         } catch (e: Exception) {
             logError(e)
@@ -97,17 +105,7 @@ class AnimeOnProvider : MainAPI() {
         val rating: Float?,
         val status: String?,
         val votes_count: Int?
-    ) {
-        fun toSearchResponse(baseUrl: String): SearchResponse? {
-            val url = anime_url?.let { "$baseUrl/anime/$it" } ?: return null
-            val posterFull = poster?.let {
-                if (it.startsWith("http")) it else "$baseUrl$it"
-            }
-            return newMovieSearchResponse(title, url, TvType.Anime) {
-                this.posterUrl = posterFull
-            }
-        }
-    }
+    )
 
     // ========================================================================
     // СТРАНИЦА ТАЙТЛА — список серий (load)
