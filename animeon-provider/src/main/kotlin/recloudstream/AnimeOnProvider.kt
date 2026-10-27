@@ -20,11 +20,12 @@ import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newSearchResponseList
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.StringUtils.encodeUri
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import org.jsoup.Jsoup
 import java.util.regex.Pattern
 
 class AnimeOnProvider : MainAPI() {
@@ -35,7 +36,7 @@ class AnimeOnProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime)
 
     // ========================================================================
-    // ГЛАВНАЯ СТРАНИЦА — популярные тайтлы с /
+    // ГЛАВНАЯ СТРАНИЦА — карточки тайтлов с /
     // ========================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         return try {
@@ -43,7 +44,7 @@ class AnimeOnProvider : MainAPI() {
             val items = extractMainPageItems(html)
             newHomePageResponse(
                 listOf(HomePageList("Популярные аниме", items, true)),
-                page < 2
+                false
             )
         } catch (e: Exception) {
             logError(e)
@@ -52,18 +53,16 @@ class AnimeOnProvider : MainAPI() {
     }
 
     private fun extractMainPageItems(html: String): List<SearchResponse> {
+        val doc = Jsoup.parse(html)
         val items = mutableListOf<SearchResponse>()
-        val pattern = Pattern.compile("""href="(/anime/[^"]+)"""")
-        val matcher = pattern.matcher(html)
         val seen = mutableSetOf<String>()
-        while (matcher.find() && items.size < 30) {
-            val slug = matcher.group(1)
-            if (slug in seen) continue
-            seen.add(slug)
-            val title = slug.substringAfterLast("/").replace("-", " ").capitalize()
-            items.add(
-                newMovieSearchResponse(title, "$mainUrl$slug", TvType.Anime) {}
-            )
+        for (a in doc.select("a[href^='/anime/']")) {
+            val href = a.attr("href")
+            if (href in seen) continue
+            val title = a.selectFirst("h3")?.text()?.takeIf { it.isNotBlank() } ?: continue
+            seen.add(href)
+            items.add(newMovieSearchResponse(title, "$mainUrl$href", TvType.Anime))
+            if (items.size >= 30) break
         }
         return items
     }
@@ -76,11 +75,11 @@ class AnimeOnProvider : MainAPI() {
             val json = app.get("$mainUrl/api/search?q=${query.encodeUri()}").text
             val data = tryParseJson<SearchApiResponse>(json)
             val items = data?.results?.mapNotNull { item ->
-                val animeSlug = item.anime_url ?: return@mapNotNull null
+                val slug = item.anime_url ?: return@mapNotNull null
                 val posterFull = item.poster?.let {
                     if (it.startsWith("http")) it else "$mainUrl$it"
                 }
-                newMovieSearchResponse(item.title, "$mainUrl/anime/$animeSlug", TvType.Anime) {
+                newMovieSearchResponse(item.title, "$mainUrl/anime/$slug", TvType.Anime) {
                     posterUrl = posterFull
                 }
             } ?: emptyList()
@@ -109,47 +108,46 @@ class AnimeOnProvider : MainAPI() {
 
     // ========================================================================
     // СТРАНИЦА ТАЙТЛА — список серий (load)
-    // HTML страницы содержит встроенный JSON объекта anime с translations
+    // Данные лежат в Next.js Flight-стринге, где кавычки экранированы: \"key\":\"value\"
     // ========================================================================
     override suspend fun load(url: String): LoadResponse {
         return try {
             val html = app.get(url).text
-            val animeBlock = extractAnimeBlock(html) ?: throw ErrorLoadingException("Anime block not found")
+            val animeStart = html.indexOf(ANIME_MARKER)
+            if (animeStart < 0) throw ErrorLoadingException("Anime block not found")
+            val segment = html.substring(animeStart)
 
-            val title = extractJsonField(animeBlock, "title") ?: "Аниме"
-            val titleOrig = extractJsonField(animeBlock, "title_orig")
-            val yearStr = extractJsonField(animeBlock, "datePublished")?.take(4)
-            val yearValue = yearStr?.toIntOrNull()
-            val description = extractJsonField(animeBlock, "description")
-            val poster = extractJsonField(animeBlock, "anime_poster")
-            val posterFull = poster?.let {
+            val titleOrig = extractEscapedField(segment, "title_orig")
+            val title = extractTitleBeforeOrig(segment) ?: titleOrig ?: "Аниме"
+            val yearValue = Regex("\"datePublished\":\"(\\d{4})")
+                .find(html)?.groupValues?.get(1)?.toIntOrNull()
+            val description = extractMeta(html, "og:description")
+                ?: extractMeta(html, "description")
+            val posterPath = extractEscapedField(segment, "anime_poster")
+            val poster = posterPath?.let {
                 if (it.startsWith("http")) it else "$mainUrl$it"
-            }.orEmpty()
+            } ?: extractMeta(html, "og:image")
 
-            val episodes = extractEpisodes(animeBlock)
-            if (episodes.isEmpty()) {
-                throw ErrorLoadingException("No episodes found")
-            }
+            val episodes = extractEpisodes(segment)
+            if (episodes.isEmpty()) throw ErrorLoadingException("No episodes found")
 
             newTvSeriesLoadResponse(
                 title,
                 url,
                 TvType.Anime,
-                episodes.mapIndexed { index, ep ->
+                episodes.map { ep ->
                     newEpisode(ep.link) {
                         name = ep.name
-                        episode = index + 1
-                        posterUrl = posterFull
+                        episode = ep.number
+                        posterUrl = poster
                     }
                 }
             ) {
                 plot = description
                 year = yearValue
-                posterUrl = posterFull
-                backgroundPosterUrl = posterFull
-                actors = titleOrig?.let {
-                    listOf(ActorData(Actor(it, "")))
-                } ?: emptyList()
+                posterUrl = poster
+                backgroundPosterUrl = poster
+                actors = titleOrig?.let { listOf(ActorData(Actor(it, ""))) } ?: emptyList()
             }
         } catch (e: Exception) {
             logError(e)
@@ -157,51 +155,68 @@ class AnimeOnProvider : MainAPI() {
         }
     }
 
-    private data class EpisodeLink(val name: String, val link: String)
+    private data class EpisodeLink(val number: Int, val name: String, val link: String)
 
-    private fun extractEpisodes(json: String): List<EpisodeLink> {
+    private fun extractEpisodes(segment: String): List<EpisodeLink> {
+        val linkMarker = "\\\"link\\\":\\\""
         val episodes = mutableListOf<EpisodeLink>()
-        // "1":{"link":"//kodikplayer.com/seria/..."}
-        val pattern = Pattern.compile("\"(\\d+)\":\\{\\s*\"link\":\"([^\"]+)\"")
-        val matcher = pattern.matcher(json)
-        while (matcher.find()) {
-            val num = matcher.group(1).toIntOrNull() ?: 0
-            var link = matcher.group(2)
+        var idx = 0
+        while (true) {
+            val p = segment.indexOf(linkMarker, idx)
+            if (p < 0) break
+            idx = p + linkMarker.length
+
+            val valueStart = p + linkMarker.length
+            val valueEnd = segment.indexOf("\\\"", valueStart)
+            if (valueEnd < 0) continue
+            var link = segment.substring(valueStart, valueEnd)
+            if (!link.contains("kodikplayer")) continue
             if (link.startsWith("//")) link = "https:$link"
-            episodes.add(EpisodeLink("Серия $num", link))
+            else if (!link.startsWith("http")) link = "https://$link"
+
+            // перед ссылкой идёт \"N\":{ — номер серии
+            val before = segment.substring(maxOf(0, p - 40), p).replace("\\\"", "\"")
+            val number = Regex("\"(\\d+)\":\\{").findAll(before).lastOrNull()
+                ?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
+            episodes.add(
+                EpisodeLink(
+                    number = number,
+                    name = if (number > 0) "Серия $number" else "Серия",
+                    link = link
+                )
+            )
         }
-        return episodes.sortedBy { it.name }
+        return episodes.distinctBy { it.number }.sortedBy { it.number }
     }
 
-    private fun extractAnimeBlock(html: String): String? {
-        val marker = "\"anime\":{"
-        val start = html.indexOf(marker)
+    private fun extractEscapedField(segment: String, key: String): String? {
+        val marker = "\\\"$key\\\":\\\""
+        val start = segment.indexOf(marker)
         if (start < 0) return null
-        var depth = 0
-        var inString = false
-        var escaped = false
-        for (i in start until html.length) {
-            val c = html[i]
-            if (escaped) { escaped = false; continue }
-            if (c == '\\') { escaped = true; continue }
-            if (inString) {
-                if (c == '"') inString = false
-                continue
-            }
-            if (c == '"') inString = true
-            else if (c == '{') depth++
-            else if (c == '}') {
-                depth--
-                if (depth == 0) return html.substring(start, i + 1)
-            }
-        }
-        return null
+        val valueStart = start + marker.length
+        val valueEnd = segment.indexOf("\\\"", valueStart)
+        if (valueEnd < 0) return null
+        return segment.substring(valueStart, valueEnd)
     }
 
-    private fun extractJsonField(json: String, key: String): String? {
-        val pattern = Pattern.compile("\"$key\":\"((?:[^\"\\\\]|\\\\.)*)\"")
-        val matcher = pattern.matcher(json)
-        return if (matcher.find()) matcher.group(1) else null
+    private fun extractTitleBeforeOrig(segment: String): String? {
+        val origMarker = "\\\"title_orig\\\":\\\""
+        val origIdx = segment.indexOf(origMarker)
+        if (origIdx < 0) return null
+        val titleMarker = "\\\"title\\\":\\\""
+        val tIdx = segment.lastIndexOf(titleMarker, origIdx)
+        if (tIdx < 0) return null
+        val valueStart = tIdx + titleMarker.length
+        val valueEnd = segment.indexOf("\\\"", valueStart)
+        if (valueEnd < 0) return null
+        return segment.substring(valueStart, valueEnd)
+    }
+
+    private fun extractMeta(html: String, name: String): String? {
+        val doc = Jsoup.parse(html)
+        return doc.selectFirst("meta[property='$name']")?.attr("content")?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("meta[name='$name']")?.attr("content")?.takeIf { it.isNotBlank() }
     }
 
     // ========================================================================
@@ -215,9 +230,8 @@ class AnimeOnProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val videoUrl = data
         val directUrl = try {
-            extractDirectVideoUrl(videoUrl)
+            extractDirectVideoUrl(data)
         } catch (e: Exception) {
             logError(e)
             null
@@ -234,8 +248,7 @@ class AnimeOnProvider : MainAPI() {
             )
             return true
         }
-        // Fallback: отдаём ссылку kodikplayer как есть
-        return loadExtractor(videoUrl, subtitleCallback, callback)
+        return loadExtractor(data, subtitleCallback, callback)
     }
 
     private suspend fun extractDirectVideoUrl(kodikUrl: String): String? {
@@ -246,5 +259,10 @@ class AnimeOnProvider : MainAPI() {
         val mp4 = Pattern.compile("https?://[^\\s\"'<>]+\\.mp4[^\\s\"'<>]*").matcher(html)
         if (mp4.find()) return mp4.group(0)
         return null
+    }
+
+    companion object {
+        // в HTML: {\"anime\":{\"alloha_iframe\":...
+        private const val ANIME_MARKER = "\\\"anime\\\":{\\\"alloha_iframe\\\""
     }
 }
