@@ -19,7 +19,7 @@ import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newSearchResponseList
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
-import com.lagradost.cloudstream3.tryParseJson
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.StringUtils.encodeUri
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -105,9 +105,6 @@ class AnimeOnProvider : MainAPI() {
             }
             return newMovieSearchResponse(title, url, TvType.Anime) {
                 this.posterUrl = posterFull
-                this.plot = title_orig
-                this.year = year
-                this.rating = rating
             }
         }
     }
