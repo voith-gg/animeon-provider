@@ -1,0 +1,8 @@
+{
+    "name": "AnimeOn provider",
+    "description": "AnimeOn.cc anime extension for CloudStream",
+    "manifestVersion": 1,
+    "pluginLists": [
+      "https://raw.githubusercontent.com/voith/animeon-provider/builds/plugins.json"
+    ]
+}
