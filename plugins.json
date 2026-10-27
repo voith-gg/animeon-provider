@@ -1,0 +1,25 @@
+[
+    {
+        "iconUrl": "https://animeon.cc/favicon-192.png",
+        "jarFileSize": 122059,
+        "fileHash": "sha256-9976b05c679e0c9abca509344a9b86448eb8b9e8acd054905e8169d021673b7d",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/voith-gg/animeon-provider",
+        "fileSize": 34142,
+        "status": 1,
+        "language": "ru",
+        "authors": [
+            "voith"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 8,
+        "internalName": "animeon-provider",
+        "jarUrl": "https://raw.githubusercontent.com/voith-gg/animeon-provider/builds/animeon-provider.jar",
+        "description": "AnimeOn.cc anime provider (Russian)",
+        "url": "https://raw.githubusercontent.com/voith-gg/animeon-provider/builds/animeon-provider.cs3",
+        "name": "animeon-provider",
+        "jarHash": "sha256-63e7dfdd80b9df403b3c7478d03fb75400f43f5e410aa5443eeb92c153699a98"
+    }
+]
