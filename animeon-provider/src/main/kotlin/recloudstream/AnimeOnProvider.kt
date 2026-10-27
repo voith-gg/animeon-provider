@@ -75,7 +75,7 @@ class AnimeOnProvider : MainAPI() {
         return try {
             val json = app.get("$mainUrl/api/search?q=${query.encodeUri()}").text
             val data = tryParseJson<SearchApiResponse>(json)
-            val items = data?.results?.mapNotNull { it.toSearchResponse() } ?: emptyList()
+            val items = data?.results?.mapNotNull { it.toSearchResponse(mainUrl) } ?: emptyList()
             newSearchResponseList(items, items.isNotEmpty())
         } catch (e: Exception) {
             logError(e)
@@ -98,10 +98,10 @@ class AnimeOnProvider : MainAPI() {
         val status: String?,
         val votes_count: Int?
     ) {
-        fun toSearchResponse(): SearchResponse? {
-            val url = anime_url?.let { "$mainUrl/anime/$it" } ?: return null
+        fun toSearchResponse(baseUrl: String): SearchResponse? {
+            val url = anime_url?.let { "$baseUrl/anime/$it" } ?: return null
             val posterFull = poster?.let {
-                if (it.startsWith("http")) it else "$mainUrl$it"
+                if (it.startsWith("http")) it else "$baseUrl$it"
             }
             return newMovieSearchResponse(title, url, TvType.Anime) {
                 this.posterUrl = posterFull
@@ -121,7 +121,7 @@ class AnimeOnProvider : MainAPI() {
             val title = extractJsonField(animeBlock, "title") ?: "Аниме"
             val titleOrig = extractJsonField(animeBlock, "title_orig")
             val yearStr = extractJsonField(animeBlock, "datePublished")?.take(4)
-            val year = yearStr?.toIntOrNull()
+            val yearValue = yearStr?.toIntOrNull()
             val description = extractJsonField(animeBlock, "description")
             val poster = extractJsonField(animeBlock, "anime_poster")
             val posterFull = poster?.let {
@@ -146,7 +146,7 @@ class AnimeOnProvider : MainAPI() {
                 }
             ) {
                 plot = description
-                year = year
+                year = yearValue
                 posterUrl = posterFull
                 backgroundPosterUrl = posterFull
                 actors = titleOrig?.let {
@@ -240,7 +240,7 @@ class AnimeOnProvider : MainAPI() {
         return loadExtractor(videoUrl, subtitleCallback, callback)
     }
 
-    private fun extractDirectVideoUrl(kodikUrl: String): String? {
+    private suspend fun extractDirectVideoUrl(kodikUrl: String): String? {
         val url = if (kodikUrl.startsWith("//")) "https:$kodikUrl" else kodikUrl
         val html = app.get(url).text
         val m3u8 = Pattern.compile("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").matcher(html)
