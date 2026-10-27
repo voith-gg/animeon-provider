@@ -26,7 +26,10 @@ jobs:
           java-version: 17
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v2
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 35
+          target: android 35
 
       - name: Build Plugins
         run: |
