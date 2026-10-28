@@ -37,7 +37,7 @@ subprojects {
     apply(plugin = "com.lagradost.cloudstream3.gradle")
 
     cloudstream {
-        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/voith/animeon-provider")
+        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/voith-gg/animeon-provider")
     }
 
     android {

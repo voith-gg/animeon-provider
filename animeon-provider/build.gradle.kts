@@ -4,6 +4,7 @@ version = 1
 cloudstream {
     description = "AnimeOn.cc anime provider (Russian)"
     authors = listOf("voith")
+    language = "ru"
 
     /**
      * Status int as one of the following:
