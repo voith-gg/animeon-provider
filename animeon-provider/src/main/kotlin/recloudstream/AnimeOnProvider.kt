@@ -14,7 +14,6 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.logError
-import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
@@ -29,7 +28,6 @@ import com.lagradost.cloudstream3.base64Decode
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import org.jsoup.Jsoup
 
-@CloudstreamPlugin
 class AnimeOnProvider : MainAPI() {
     override var mainUrl = "https://animeon.cc"
     override var name = "AnimeOn"
