@@ -21,12 +21,12 @@ import com.lagradost.cloudstream3.newSearchResponseList
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.StringUtils.encodeUri
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import android.util.Base64
 import org.jsoup.Jsoup
-import java.util.regex.Pattern
 
 class AnimeOnProvider : MainAPI() {
     override var mainUrl = "https://animeon.cc"
@@ -40,7 +40,7 @@ class AnimeOnProvider : MainAPI() {
     // ========================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         return try {
-            val html = app.get("$mainUrl/").text
+            val html = app.get("$mainUrl/", headers = BROWSER_HEADERS).text
             val items = extractMainPageItems(html)
             newHomePageResponse(
                 listOf(HomePageList("Популярные аниме", items, true)),
@@ -72,7 +72,7 @@ class AnimeOnProvider : MainAPI() {
     // ========================================================================
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         return try {
-            val json = app.get("$mainUrl/api/search?q=${query.encodeUri()}").text
+            val json = app.get("$mainUrl/api/search?q=${query.encodeUri()}", headers = BROWSER_HEADERS).text
             val data = tryParseJson<SearchApiResponse>(json)
             val items = data?.results?.mapNotNull { item ->
                 val slug = item.anime_url ?: return@mapNotNull null
@@ -90,10 +90,12 @@ class AnimeOnProvider : MainAPI() {
         }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class SearchApiResponse(
         val results: List<SearchApiItem>?
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class SearchApiItem(
         val title: String,
         val title_orig: String?,
@@ -112,7 +114,7 @@ class AnimeOnProvider : MainAPI() {
     // ========================================================================
     override suspend fun load(url: String): LoadResponse {
         return try {
-            val html = app.get(url).text
+            val html = app.get(url, headers = BROWSER_HEADERS).text
             val animeStart = html.indexOf(ANIME_MARKER)
             if (animeStart < 0) throw ErrorLoadingException("Anime block not found")
             val segment = html.substring(animeStart)
@@ -221,8 +223,8 @@ class AnimeOnProvider : MainAPI() {
 
     // ========================================================================
     // ССЫЛКИ НА ВИДЕО (loadLinks)
-    // Сложный путь: попытаться вытащить прямой .m3u8/.mp4 со страницы kodikplayer.
-    // Легкий fallback: loadExtractor на ссылку kodikplayer.
+    // Сложный путь: kodikplayer -> POST /ftor -> расшифровка ссылок (Caesar + Base64).
+    // Легкий fallback: loadExtractor по ссылке kodikplayer.
     // ========================================================================
     override suspend fun loadLinks(
         data: String,
@@ -230,38 +232,147 @@ class AnimeOnProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val directUrl = try {
-            extractDirectVideoUrl(data)
+        val links = try {
+            extractKodikLinks(data)
         } catch (e: Exception) {
             logError(e)
-            null
+            emptyList()
         }
-        if (directUrl != null) {
-            callback(
-                newExtractorLink(
-                    name,
-                    "Видео (kodikplayer)",
-                    directUrl
-                ) {
-                    quality = Qualities.P720.value
-                }
-            )
+
+        if (links.isNotEmpty()) {
+            for ((quality, link) in links) {
+                val linkName = if (quality > 0) "Kodik ${quality}p" else "Kodik"
+                callback(
+                    newExtractorLink(
+                        name,
+                        linkName,
+                        link
+                    ) {
+                        this.quality = quality
+                        this.referer = "https://kodikplayer.com/"
+                    }
+                )
+            }
             return true
         }
+
         return loadExtractor(data, subtitleCallback, callback)
     }
 
-    private suspend fun extractDirectVideoUrl(kodikUrl: String): String? {
-        val url = if (kodikUrl.startsWith("//")) "https:$kodikUrl" else kodikUrl
-        val html = app.get(url).text
-        val m3u8 = Pattern.compile("https?://[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*").matcher(html)
-        if (m3u8.find()) return m3u8.group(0)
-        val mp4 = Pattern.compile("https?://[^\\s\"'<>]+\\.mp4[^\\s\"'<>]*").matcher(html)
-        if (mp4.find()) return mp4.group(0)
-        return null
+    private suspend fun extractKodikLinks(kodikUrl: String): List<Pair<Int, String>> {
+        val url = normalizeUrl(kodikUrl)
+        val html = app.get(url, headers = BROWSER_HEADERS).text
+
+        val paramsRaw = Regex("var urlParams = '(\\{.*?\\})';", RegexOption.DOT_MATCHES_ALL)
+            .find(html)?.groupValues?.get(1) ?: return emptyList()
+        val domain = extractJsVar(html, "domain") ?: "kodikplayer.com"
+        val type = extractVInfo(html, "type") ?: extractJsVar(html, "type") ?: "seria"
+        val id = extractVInfo(html, "id") ?: return emptyList()
+        val hash = extractVInfo(html, "hash") ?: return emptyList()
+
+        val dSign = extractJsonValue(paramsRaw, "d_sign") ?: return emptyList()
+        val refSign = extractJsonValue(paramsRaw, "ref_sign") ?: return emptyList()
+        val form = mapOf(
+            "d" to (extractJsonValue(paramsRaw, "d") ?: domain),
+            "d_sign" to dSign,
+            "pd" to (extractJsonValue(paramsRaw, "pd") ?: domain),
+            "pd_sign" to (extractJsonValue(paramsRaw, "pd_sign") ?: dSign),
+            "ref" to (extractJsonValue(paramsRaw, "ref") ?: ""),
+            "ref_sign" to refSign,
+            "bad_user" to "",
+            "cdn_is_working" to "",
+            "type" to type,
+            "hash" to hash,
+            "id" to id
+        )
+
+        val response = app.post(
+            "https://$domain/ftor",
+            data = form,
+            headers = BROWSER_HEADERS + mapOf(
+                "Origin" to "https://$domain",
+                "Referer" to url,
+                "X-Requested-With" to "XMLHttpRequest"
+            )
+        ).text
+
+        val parsed = tryParseJson<KodikResponse>(response) ?: return emptyList()
+        val result = mutableListOf<Pair<Int, String>>()
+
+        parsed.link?.takeIf { it.isNotBlank() }?.let {
+            result.add((parsed.default ?: 0) to normalizeUrl(it))
+        }
+        for ((qualityKey, videos) in parsed.links.orEmpty()) {
+            val quality = qualityKey.toIntOrNull() ?: 0
+            for (video in videos) {
+                val src = video.src ?: continue
+                val decoded = if (src.startsWith("//")) src else (decodeKodikSrc(src) ?: continue)
+                result.add(quality to normalizeUrl(decoded))
+            }
+        }
+
+        return result.distinctBy { it.second }.sortedByDescending { it.first }
     }
 
+    private fun normalizeUrl(url: String): String = when {
+        url.startsWith("//") -> "https:$url"
+        url.startsWith("http") -> url
+        else -> "https://$url"
+    }
+
+    private fun decodeKodikSrc(src: String): String? {
+        val shifted = buildString {
+            for (ch in src) {
+                if (ch in 'A'..'Z' || ch in 'a'..'z') {
+                    val base = if (ch in 'A'..'Z') 90 else 122
+                    var code = ch.code + 18
+                    if (code > base) code -= 26
+                    append(code.toChar())
+                } else {
+                    append(ch)
+                }
+            }
+        }
+        val padded = when (shifted.length % 4) {
+            2 -> "$shifted=="
+            3 -> "$shifted="
+            else -> shifted
+        }
+        return try {
+            String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun extractJsonValue(json: String, key: String): String? =
+        Regex("\"$key\"\\s*:\\s*\"([^\"]*)\"").find(json)?.groupValues?.get(1)
+
+    private fun extractJsVar(html: String, name: String): String? =
+        Regex("var\\s+$name\\s*=\\s*[\"']([^\"']*)[\"']")
+            .find(html)?.groupValues?.get(1)
+
+    private fun extractVInfo(html: String, key: String): String? =
+        Regex("vInfo\\.$key\\s*=\\s*'([^']*)'").find(html)?.groupValues?.get(1)
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private data class KodikResponse(
+        val links: Map<String, List<KodikVideo>>? = null,
+        val link: String? = null,
+        val default: Int? = null
+    )
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private data class KodikVideo(
+        val src: String? = null,
+        val type: String? = null
+    )
+
     companion object {
+        private const val BROWSER_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        private val BROWSER_HEADERS = mapOf("User-Agent" to BROWSER_UA)
+
         // в HTML: {\"anime\":{\"alloha_iframe\":...
         private const val ANIME_MARKER = "\\\"anime\\\":{\\\"alloha_iframe\\\""
     }
