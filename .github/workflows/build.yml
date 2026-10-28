@@ -45,7 +45,16 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
-          ./gradlew make makePluginsJson
+          success=0
+          for attempt in 1 2 3; do
+            if ./gradlew make makePluginsJson; then
+              success=1
+              break
+            fi
+            echo "Gradle attempt $attempt failed, retrying in 20s..."
+            sleep 20
+          done
+          [ "$success" = "1" ] || exit 1
           ./gradlew ensureJarCompatibility
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds
           cp **/build/*.jar $GITHUB_WORKSPACE/builds

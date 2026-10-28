@@ -24,8 +24,8 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.StringUtils.encodeUri
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.base64Decode
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
-import android.util.Base64
 import org.jsoup.Jsoup
 
 class AnimeOnProvider : MainAPI() {
@@ -75,11 +75,12 @@ class AnimeOnProvider : MainAPI() {
             val json = app.get("$mainUrl/api/search?q=${query.encodeUri()}", headers = BROWSER_HEADERS).text
             val data = tryParseJson<SearchApiResponse>(json)
             val items = data?.results?.mapNotNull { item ->
+                val title = item.title ?: return@mapNotNull null
                 val slug = item.anime_url ?: return@mapNotNull null
                 val posterFull = item.poster?.let {
                     if (it.startsWith("http")) it else "$mainUrl$it"
                 }
-                newMovieSearchResponse(item.title, "$mainUrl/anime/$slug", TvType.Anime) {
+                newMovieSearchResponse(title, "$mainUrl/anime/$slug", TvType.Anime) {
                     posterUrl = posterFull
                 }
             } ?: emptyList()
@@ -97,7 +98,7 @@ class AnimeOnProvider : MainAPI() {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     private data class SearchApiItem(
-        val title: String,
+        val title: String?,
         val title_orig: String?,
         val year: Int?,
         val poster: String?,
@@ -177,7 +178,7 @@ class AnimeOnProvider : MainAPI() {
             else if (!link.startsWith("http")) link = "https://$link"
 
             // перед ссылкой идёт \"N\":{ — номер серии
-            val before = segment.substring(maxOf(0, p - 40), p).replace("\\\"", "\"")
+            val before = segment.substring(maxOf(0, p - 200), p).replace("\\\"", "\"")
             val number = Regex("\"(\\d+)\":\\{").findAll(before).lastOrNull()
                 ?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
@@ -189,7 +190,9 @@ class AnimeOnProvider : MainAPI() {
                 )
             )
         }
-        return episodes.distinctBy { it.number }.sortedBy { it.number }
+        return episodes
+            .distinctBy { if (it.number > 0) "n${it.number}" else "l${it.link}" }
+            .sortedBy { it.number }
     }
 
     private fun extractEscapedField(segment: String, key: String): String? {
@@ -339,7 +342,7 @@ class AnimeOnProvider : MainAPI() {
             else -> shifted
         }
         return try {
-            String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+            base64Decode(padded)
         } catch (e: Exception) {
             null
         }
@@ -371,7 +374,7 @@ class AnimeOnProvider : MainAPI() {
     companion object {
         private const val BROWSER_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        private val BROWSER_HEADERS = mapOf("User-Agent" to BROWSER_UA)
+        private val BROWSER_HEADERS = mapOf("user-agent" to BROWSER_UA)
 
         // в HTML: {\"anime\":{\"alloha_iframe\":...
         private const val ANIME_MARKER = "\\\"anime\\\":{\\\"alloha_iframe\\\""
