@@ -9,15 +9,14 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.SearchResponseList
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.newSearchResponseList
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -34,47 +33,100 @@ class AnimeOnProvider : MainAPI() {
     override var lang = "ru"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
+    override val mainPage = mainPageOf("popular" to "Популярные аниме")
 
     // ========================================================================
     // ГЛАВНАЯ СТРАНИЦА — карточки тайтлов с /
     // ========================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        return try {
-            val html = app.get("$mainUrl/", headers = BROWSER_HEADERS).text
-            val items = extractMainPageItems(html)
-            newHomePageResponse(
-                listOf(HomePageList("Популярные аниме", items, true)),
-                false
-            )
-        } catch (e: Exception) {
-            logError(e)
-            newHomePageResponse(emptyList(), false)
+        val html = getHtml("$mainUrl/")
+        val items = extractMainPageItems(html)
+        if (items.isEmpty()) {
+            throw ErrorLoadingException("AnimeOn: на главной странице не найдены карточки")
         }
+        return newHomePageResponse(
+            listOf(HomePageList(request.name.ifBlank { "Популярные аниме" }, items, true)),
+            false
+        )
+    }
+
+    private suspend fun getHtml(url: String, referer: String? = null): String {
+        val response = app.get(
+            url,
+            headers = BROWSER_HEADERS,
+            referer = referer ?: "$mainUrl/"
+        )
+        if (response.code == 403 || response.code == 503) {
+            throw ErrorLoadingException("AnimeOn: HTTP ${response.code} (возможно, Cloudflare)")
+        }
+        val html = response.text
+        if (html.contains("Just a moment...") ||
+            html.contains("cf-chl-") ||
+            html.contains("Attention Required! | Cloudflare")
+        ) {
+            throw ErrorLoadingException("AnimeOn: Cloudflare challenge")
+        }
+        return html
     }
 
     private fun extractMainPageItems(html: String): List<SearchResponse> {
         val doc = Jsoup.parse(html)
         val items = mutableListOf<SearchResponse>()
         val seen = mutableSetOf<String>()
-        for (a in doc.select("a[href^='/anime/']")) {
-            val href = a.attr("href")
-            if (href in seen) continue
-            val title = a.selectFirst("h3")?.text()?.takeIf { it.isNotBlank() } ?: continue
-            seen.add(href)
-            items.add(newMovieSearchResponse(title, "$mainUrl$href", TvType.Anime))
+
+        fun addItem(title: String, href: String, poster: String?) {
+            if (title.isBlank() || href.isBlank()) return
+            val url = when {
+                href.startsWith("http") -> href
+                href.startsWith("/") -> "$mainUrl$href"
+                else -> "$mainUrl/$href"
+            }
+            if (!seen.add(url)) return
+            items.add(newMovieSearchResponse(title, url, TvType.Anime) {
+                this.posterUrl = poster?.let {
+                    if (it.startsWith("http")) it else "$mainUrl$it"
+                }
+            })
+        }
+
+        // Актуальная разметка сайта: <a> -> ... -> h3.aon-card-title
+        for (h3 in doc.select("h3.aon-card-title")) {
+            val a = h3.closest("a[href]") ?: continue
+            val poster = a.selectFirst("img")?.let { img ->
+                img.attr("src").takeIf { it.isNotBlank() && !it.startsWith("data:") }
+                    ?: img.attr("data-src").takeIf { it.isNotBlank() }
+            }
+            addItem(h3.text(), a.attr("href"), poster)
             if (items.size >= 30) break
         }
+
+        // Запасной вариант для старой/альтернативной разметки
+        if (items.isEmpty()) {
+            for (a in doc.select("a[href*='/anime/']")) {
+                val title = a.selectFirst("h3")?.text()?.takeIf { it.isNotBlank() } ?: continue
+                addItem(title, a.attr("href"), a.selectFirst("img")?.attr("src"))
+                if (items.size >= 30) break
+            }
+        }
+
         return items
     }
 
     // ========================================================================
     // ПОИСК — GET /api/search?q=QUERY (JSON API)
     // ========================================================================
-    override suspend fun search(query: String, page: Int): SearchResponseList? {
+    override suspend fun search(query: String): List<SearchResponse>? {
         return try {
-            val json = app.get("$mainUrl/api/search?q=${query.encodeUri()}", headers = BROWSER_HEADERS).text
-            val data = tryParseJson<SearchApiResponse>(json)
-            val items = data?.results?.mapNotNull { item ->
+            val response = app.get(
+                "$mainUrl/api/search?q=${query.encodeUri()}",
+                headers = API_HEADERS,
+                referer = "$mainUrl/"
+            )
+            if (response.code !in 200..299) {
+                throw ErrorLoadingException("AnimeOn API: HTTP ${response.code}")
+            }
+            val data = tryParseJson<SearchApiResponse>(response.text)
+            data?.results?.mapNotNull { item ->
                 val title = item.title ?: return@mapNotNull null
                 val slug = item.anime_url ?: return@mapNotNull null
                 val posterFull = item.poster?.let {
@@ -84,7 +136,6 @@ class AnimeOnProvider : MainAPI() {
                     posterUrl = posterFull
                 }
             } ?: emptyList()
-            newSearchResponseList(items, items.isNotEmpty())
         } catch (e: Exception) {
             logError(e)
             null
@@ -115,7 +166,7 @@ class AnimeOnProvider : MainAPI() {
     // ========================================================================
     override suspend fun load(url: String): LoadResponse {
         return try {
-            val html = app.get(url, headers = BROWSER_HEADERS).text
+            val html = getHtml(url)
             val animeStart = html.indexOf(ANIME_MARKER)
             if (animeStart < 0) throw ErrorLoadingException("Anime block not found")
             val segment = html.substring(animeStart)
@@ -264,7 +315,7 @@ class AnimeOnProvider : MainAPI() {
 
     private suspend fun extractKodikLinks(kodikUrl: String): List<Pair<Int, String>> {
         val url = normalizeUrl(kodikUrl)
-        val html = app.get(url, headers = BROWSER_HEADERS).text
+        val html = getHtml(url)
 
         val paramsRaw = Regex("var urlParams = '(\\{.*?\\})';", RegexOption.DOT_MATCHES_ALL)
             .find(html)?.groupValues?.get(1) ?: return emptyList()
@@ -292,7 +343,7 @@ class AnimeOnProvider : MainAPI() {
         val response = app.post(
             "https://$domain/ftor",
             data = form,
-            headers = BROWSER_HEADERS + mapOf(
+            headers = API_HEADERS + mapOf(
                 "Origin" to "https://$domain",
                 "Referer" to url,
                 "X-Requested-With" to "XMLHttpRequest"
@@ -374,7 +425,16 @@ class AnimeOnProvider : MainAPI() {
     companion object {
         private const val BROWSER_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        private val BROWSER_HEADERS = mapOf("user-agent" to BROWSER_UA)
+        private val BROWSER_HEADERS = mapOf(
+            "user-agent" to BROWSER_UA,
+            "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "accept-language" to "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+        )
+        private val API_HEADERS = mapOf(
+            "user-agent" to BROWSER_UA,
+            "accept" to "application/json, text/plain, */*",
+            "accept-language" to "ru-RU,ru;q=0.9,en;q=0.8"
+        )
 
         // в HTML: {\"anime\":{\"alloha_iframe\":...
         private const val ANIME_MARKER = "\\\"anime\\\":{\\\"alloha_iframe\\\""
