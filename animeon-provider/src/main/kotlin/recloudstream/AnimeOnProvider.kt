@@ -18,7 +18,6 @@ import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.StringUtils.encodeUri
@@ -34,19 +33,63 @@ class AnimeOnProvider : MainAPI() {
     override var lang = "ru"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
-    override val mainPage = mainPageOf("popular" to "Популярные аниме")
+    override val mainPage = mainPageOf("popular_v6" to "Популярные аниме")
 
     // ========================================================================
     // ГЛАВНАЯ СТРАНИЦА — карточки тайтлов с /
     // ========================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val html = getHtml("$mainUrl/")
-        val items = extractMainPageItems(html)
-        if (items.isEmpty()) {
-            throw ErrorLoadingException("AnimeOn: на главной странице не найдены карточки")
+        var homeError: Exception? = null
+
+        try {
+            val html = getHtml("$mainUrl/")
+            val items = extractMainPageItems(html)
+            if (items.isNotEmpty()) {
+                return newHomePageResponse(
+                    listOf(HomePageList(request.name.ifBlank { "Популярные аниме" }, items, true)),
+                    false
+                )
+            }
+            homeError = ErrorLoadingException(
+                "AnimeOn: на главной не найдены карточки (HTML ${html.length} байт)"
+            )
+        } catch (e: Exception) {
+            homeError = e
         }
+
+        val error = homeError ?: ErrorLoadingException("AnimeOn: неизвестная ошибка")
+        logError(error)
+
+        // Резерв: если HTML главной недоступен/изменился, пробуем поисковый API.
+        // Это не «популярное», но лучше пустого экрана и сразу показывает, жив ли API.
+        var fallback = emptyList<SearchResponse>()
+        for (query in listOf("аниме", "на")) {
+            try {
+                val result = search(query) ?: emptyList()
+                if (result.isNotEmpty()) {
+                    fallback = result.take(30)
+                    break
+                }
+            } catch (e: Exception) {
+                logError(e)
+            }
+        }
+        if (fallback.isNotEmpty()) {
+            return newHomePageResponse(
+                listOf(HomePageList("AnimeOn: резервный каталог", fallback, true)),
+                false
+            )
+        }
+
+        // Последний рубеж: показываем ошибку карточкой, а не пустой главной.
+        val message = (error.message ?: error.toString()).take(180)
+        val diagnostic = newMovieSearchResponse(
+            "Ошибка AnimeOn: $message",
+            "$mainUrl/",
+            TvType.Anime
+        )
         return newHomePageResponse(
-            listOf(HomePageList(request.name.ifBlank { "Популярные аниме" }, items, true)),
+            listOf(HomePageList("AnimeOn: диагностика", listOf(diagnostic), false)),
             false
         )
     }
@@ -191,7 +234,7 @@ class AnimeOnProvider : MainAPI() {
                 url,
                 TvType.Anime,
                 episodes.map { ep ->
-                    newEpisode(ep.sources.toJson()) {
+                    newEpisode(encodeSources(ep.sources)) {
                         name = ep.name
                         episode = ep.number
                         posterUrl = poster
@@ -215,6 +258,47 @@ class AnimeOnProvider : MainAPI() {
         val translation: String? = null,
         val url: String? = null
     )
+
+    // Формат data серии: "animeon-v1\nозвучка\tURL\nозвучка\tURL".
+    // Не JSON: так данные переживают любую сериализацию CloudStream.
+    private fun encodeSources(sources: List<EpisodeSource>): String {
+        if (sources.isEmpty()) return "animeon-v1\n"
+        return buildString {
+            append("animeon-v1")
+            for (source in sources) {
+                append('\n')
+                append(source.translation.orEmpty().replace('\t', ' ').replace('\n', ' '))
+                append('\t')
+                append(source.url.orEmpty())
+            }
+        }
+    }
+
+    private fun decodeSources(data: String): List<EpisodeSource> {
+        if (data == "animeon-v1" || data == "animeon-v1\n") return emptyList()
+        if (data.startsWith("animeon-v1\n")) {
+            return data.removePrefix("animeon-v1\n")
+                .lineSequence()
+                .mapNotNull { line ->
+                    val tab = line.indexOf('\t')
+                    if (tab < 0) null else EpisodeSource(
+                        translation = line.substring(0, tab).ifBlank { null },
+                        url = line.substring(tab + 1).ifBlank { null }
+                    )
+                }
+                .filter { !it.url.isNullOrBlank() }
+                .toList()
+        }
+
+        // Совместимость с сериями, сохранёнными в v4/v5 как JSON.
+        val jsonSources = tryParseJson<List<EpisodeSource>>(data)
+        if (jsonSources != null) {
+            return jsonSources.filter { !it.url.isNullOrBlank() }
+        }
+
+        // Совсем старый формат — одна ссылка без озвучки.
+        return if (data.isBlank()) emptyList() else listOf(EpisodeSource("Kodik", data))
+    }
 
     private data class EpisodeLink(
         val number: Int,
@@ -328,9 +412,7 @@ class AnimeOnProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val sources = tryParseJson<List<EpisodeSource>>(data)
-            ?.filter { !it.url.isNullOrBlank() }
-            ?: listOf(EpisodeSource("Kodik", data))
+        val sources = decodeSources(data)
         if (sources.isEmpty()) return false
 
         val seen = mutableSetOf<String>()
@@ -432,7 +514,11 @@ class AnimeOnProvider : MainAPI() {
             val quality = qualityKey.toIntOrNull() ?: 0
             for (video in videos) {
                 val src = video.src ?: continue
-                val decoded = if (src.startsWith("//")) src else (decodeKodikSrc(src) ?: continue)
+                val decoded = when {
+                    src.startsWith("//") -> src
+                    src.startsWith("http") -> src
+                    else -> decodeKodikSrc(src) ?: continue
+                }
                 result.add(quality to normalizeUrl(decoded))
             }
         }
