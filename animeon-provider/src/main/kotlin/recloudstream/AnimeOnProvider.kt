@@ -355,11 +355,10 @@ class AnimeOnProvider : MainAPI() {
             if (kodikLinks.isNotEmpty()) {
                 for ((quality, link) in kodikLinks) {
                     if (!seen.add(link)) continue
-                    val linkName = if (quality > 0) "$translation • ${quality}p" else translation
                     callback(
                         newExtractorLink(
                             name,
-                            linkName,
+                            translation,
                             link
                         ) {
                             this.quality = quality
