@@ -18,6 +18,7 @@ import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.StringUtils.encodeUri
@@ -190,7 +191,7 @@ class AnimeOnProvider : MainAPI() {
                 url,
                 TvType.Anime,
                 episodes.map { ep ->
-                    newEpisode(ep.link) {
+                    newEpisode(ep.sources.toJson()) {
                         name = ep.name
                         episode = ep.number
                         posterUrl = poster
@@ -209,40 +210,81 @@ class AnimeOnProvider : MainAPI() {
         }
     }
 
-    private data class EpisodeLink(val number: Int, val name: String, val link: String)
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private data class EpisodeSource(
+        val translation: String? = null,
+        val url: String? = null
+    )
+
+    private data class EpisodeLink(
+        val number: Int,
+        val name: String,
+        val sources: List<EpisodeSource>
+    )
 
     private fun extractEpisodes(segment: String): List<EpisodeLink> {
+        // В HTML ключи экранированы: \"2x2\":{\"episodes\":{\"1\":{\"link\":\"...
+        val translationMarker = "\\\"episodes\\\":{\\\""
+        val translations = mutableListOf<Pair<String, Int>>()
+        var markerFrom = 0
+        while (true) {
+            val p = segment.indexOf(translationMarker, markerFrom)
+            if (p < 0) break
+            markerFrom = p + translationMarker.length
+
+            // Имя озвучки стоит перед \"episodes\": \"2x2\":{ \"episodes\"
+            val closeName = segment.lastIndexOf("\\\"", p - 1)
+            if (closeName < 0) continue
+            val openName = segment.lastIndexOf("\\\"", closeName - 1)
+            if (openName < 0) continue
+            val translation = segment.substring(openName + 2, closeName)
+            if (translation.isBlank() || translation.length > 80) continue
+            translations.add(translation to p)
+        }
+
         val linkMarker = "\\\"link\\\":\\\""
-        val episodes = mutableListOf<EpisodeLink>()
+        val raw = mutableListOf<Triple<Int, String, String>>()
+        var translationIndex = 0
+        var currentTranslation = "Kodik"
         var idx = 0
+
         while (true) {
             val p = segment.indexOf(linkMarker, idx)
             if (p < 0) break
             idx = p + linkMarker.length
 
+            while (translationIndex < translations.size && translations[translationIndex].second < p) {
+                currentTranslation = translations[translationIndex].first
+                translationIndex++
+            }
+
             val valueStart = p + linkMarker.length
             val valueEnd = segment.indexOf("\\\"", valueStart)
             if (valueEnd < 0) continue
             var link = segment.substring(valueStart, valueEnd)
-            if (!link.contains("kodikplayer")) continue
+            if (!link.startsWith("//") && !link.startsWith("http")) continue
             if (link.startsWith("//")) link = "https:$link"
-            else if (!link.startsWith("http")) link = "https://$link"
 
             // перед ссылкой идёт \"N\":{ — номер серии
             val before = segment.substring(maxOf(0, p - 200), p).replace("\\\"", "\"")
             val number = Regex("\"(\\d+)\":\\{").findAll(before).lastOrNull()
                 ?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            if (number <= 0) continue
 
-            episodes.add(
+            raw.add(Triple(number, currentTranslation, link))
+        }
+
+        return raw
+            .groupBy { it.first }
+            .map { (number, list) ->
                 EpisodeLink(
                     number = number,
-                    name = if (number > 0) "Серия $number" else "Серия",
-                    link = link
+                    name = "Серия $number",
+                    sources = list
+                        .map { EpisodeSource(it.second, it.third) }
+                        .distinctBy { it.url }
                 )
-            )
-        }
-        return episodes
-            .distinctBy { if (it.number > 0) "n${it.number}" else "l${it.link}" }
+            }
             .sortedBy { it.number }
     }
 
@@ -286,31 +328,62 @@ class AnimeOnProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val links = try {
-            extractKodikLinks(data)
-        } catch (e: Exception) {
-            logError(e)
-            emptyList()
-        }
+        val sources = tryParseJson<List<EpisodeSource>>(data)
+            ?.filter { !it.url.isNullOrBlank() }
+            ?: listOf(EpisodeSource("Kodik", data))
+        if (sources.isEmpty()) return false
 
-        if (links.isNotEmpty()) {
-            for ((quality, link) in links) {
-                val linkName = if (quality > 0) "Kodik ${quality}p" else "Kodik"
-                callback(
-                    newExtractorLink(
-                        name,
-                        linkName,
-                        link
-                    ) {
-                        this.quality = quality
-                        this.referer = "https://kodikplayer.com/"
-                    }
-                )
+        val seen = mutableSetOf<String>()
+        var found = false
+
+        for (source in sources) {
+            val rawUrl = source.url ?: continue
+            val sourceUrl = normalizeUrl(rawUrl)
+            val translation = source.translation?.takeIf { it.isNotBlank() } ?: "Kodik"
+
+            val kodikLinks = if (sourceUrl.contains("kodikplayer")) {
+                try {
+                    extractKodikLinks(sourceUrl)
+                } catch (e: Exception) {
+                    logError(e)
+                    emptyList()
+                }
+            } else {
+                emptyList()
             }
-            return true
+
+            if (kodikLinks.isNotEmpty()) {
+                for ((quality, link) in kodikLinks) {
+                    if (!seen.add(link)) continue
+                    val linkName = if (quality > 0) "$translation • ${quality}p" else translation
+                    callback(
+                        newExtractorLink(
+                            name,
+                            linkName,
+                            link
+                        ) {
+                            this.quality = quality
+                            this.referer = "https://kodikplayer.com/"
+                        }
+                    )
+                    found = true
+                }
+            } else {
+                // Другой хост/плеер — пробуем стандартный extractor
+                try {
+                    loadExtractor(sourceUrl, subtitleCallback) { link ->
+                        if (seen.add(link.url)) {
+                            callback(link)
+                            found = true
+                        }
+                    }
+                } catch (e: Exception) {
+                    logError(e)
+                }
+            }
         }
 
-        return loadExtractor(data, subtitleCallback, callback)
+        return found
     }
 
     private suspend fun extractKodikLinks(kodikUrl: String): List<Pair<Int, String>> {
