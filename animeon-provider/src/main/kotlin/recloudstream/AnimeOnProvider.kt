@@ -234,7 +234,10 @@ class AnimeOnProvider : MainAPI() {
                 url,
                 TvType.Anime,
                 episodes.map { ep ->
-                    newEpisode(encodeSources(ep.sources)) {
+                    newEpisode(
+                        url = encodeSources(ep.sources),
+                        fix = false
+                    ) {
                         name = ep.name
                         episode = ep.number
                         posterUrl = poster
@@ -275,9 +278,12 @@ class AnimeOnProvider : MainAPI() {
     }
 
     private fun decodeSources(data: String): List<EpisodeSource> {
-        if (data == "animeon-v1" || data == "animeon-v1\n") return emptyList()
-        if (data.startsWith("animeon-v1\n")) {
-            return data.removePrefix("animeon-v1\n")
+        // CloudStream's newEpisode() applies fixUrl() unless fix=false; strip the
+        // provider prefix so episodes loaded by v4-v6 keep working after upgrade.
+        val payload = data.removePrefix("$mainUrl/").removePrefix(mainUrl)
+        if (payload == "animeon-v1" || payload == "animeon-v1\n") return emptyList()
+        if (payload.startsWith("animeon-v1\n")) {
+            return payload.removePrefix("animeon-v1\n")
                 .lineSequence()
                 .mapNotNull { line ->
                     val tab = line.indexOf('\t')
@@ -291,13 +297,13 @@ class AnimeOnProvider : MainAPI() {
         }
 
         // Совместимость с сериями, сохранёнными в v4/v5 как JSON.
-        val jsonSources = tryParseJson<List<EpisodeSource>>(data)
+        val jsonSources = tryParseJson<List<EpisodeSource>>(payload)
         if (jsonSources != null) {
             return jsonSources.filter { !it.url.isNullOrBlank() }
         }
 
         // Совсем старый формат — одна ссылка без озвучки.
-        return if (data.isBlank()) emptyList() else listOf(EpisodeSource("Kodik", data))
+        return if (payload.isBlank()) emptyList() else listOf(EpisodeSource("Kodik", payload))
     }
 
     private data class EpisodeLink(
