@@ -236,12 +236,13 @@ class AnimeOnProvider : MainAPI() {
                 episodes.map { ep ->
                     newEpisode(
                         url = encodeSources(ep.sources),
+                        initializer = {
+                            name = ep.name
+                            episode = ep.number
+                            posterUrl = poster
+                        },
                         fix = false
-                    ) {
-                        name = ep.name
-                        episode = ep.number
-                        posterUrl = poster
-                    }
+                    )
                 }
             ) {
                 plot = description
@@ -279,8 +280,10 @@ class AnimeOnProvider : MainAPI() {
 
     private fun decodeSources(data: String): List<EpisodeSource> {
         // CloudStream's newEpisode() applies fixUrl() unless fix=false; strip the
-        // provider prefix so episodes loaded by v4-v6 keep working after upgrade.
-        val payload = data.removePrefix("$mainUrl/").removePrefix(mainUrl)
+        // provider prefix so episodes loaded by v6 keep working after upgrade.
+        val payload =
+            if (data.startsWith("$mainUrl/animeon-v1")) data.removePrefix("$mainUrl/")
+            else data
         if (payload == "animeon-v1" || payload == "animeon-v1\n") return emptyList()
         if (payload.startsWith("animeon-v1\n")) {
             return payload.removePrefix("animeon-v1\n")
