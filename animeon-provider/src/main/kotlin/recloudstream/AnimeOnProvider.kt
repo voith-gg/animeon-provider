@@ -489,12 +489,14 @@ class AnimeOnProvider : MainAPI() {
 
         val dSign = extractJsonValue(paramsRaw, "d_sign") ?: return emptyList()
         val refSign = extractJsonValue(paramsRaw, "ref_sign") ?: return emptyList()
+        val playerHost = url.substringAfter("://").substringBefore('/')
         val form = mapOf(
             "d" to (extractJsonValue(paramsRaw, "d") ?: domain),
             "d_sign" to dSign,
             "pd" to (extractJsonValue(paramsRaw, "pd") ?: domain),
             "pd_sign" to (extractJsonValue(paramsRaw, "pd_sign") ?: dSign),
-            "ref" to (extractJsonValue(paramsRaw, "ref") ?: ""),
+            "ref" to (extractJsVar(html, "ref")
+                ?: java.net.URLDecoder.decode(extractJsonValue(paramsRaw, "ref") ?: "", "UTF-8")),
             "ref_sign" to refSign,
             "bad_user" to "",
             "cdn_is_working" to "",
@@ -504,10 +506,10 @@ class AnimeOnProvider : MainAPI() {
         )
 
         val response = app.post(
-            "https://$domain/ftor",
+            "https://$playerHost/ftor",
             data = form,
             headers = API_HEADERS + mapOf(
-                "Origin" to "https://$domain",
+                "Origin" to "https://$playerHost",
                 "Referer" to url,
                 "X-Requested-With" to "XMLHttpRequest"
             )
