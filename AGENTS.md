@@ -23,7 +23,7 @@ CloudStream extension for `animeon.cc`. One module: `animeon-provider`; plugin e
 
 ## Provider gotchas
 
-- `newEpisode(url)` calls `fixUrl(url)` by default. For non-URL `Episode.data`, use `newEpisode(url = data, fix = false)`. Otherwise CloudStream prefixes it with `https://animeon.cc/` and `loadLinks` cannot decode it. This exact bug broke v6 playback.
+- `newEpisode(url)` calls `fixUrl(url)` by default. For non-URL `Episode.data`, use `newEpisode(url = data, initializer = { ... }, fix = false)`. The initializer must be named: `fix` is the last parameter, so a trailing lambda will not compile. Otherwise CloudStream prefixes the data with `https://animeon.cc/` and `loadLinks` cannot decode it. This exact bug broke v6 playback.
 - Episode data uses `animeon-v1\n<voiceover>\t<url>...`. Keep the decoder compatible with v4/v5 JSON and the old plain-URL format; it also strips the legacy `https://animeon.cc/` prefix.
 - Search uses `/api/search?q=`. Title episodes live in escaped Next.js Flight JSON (`\"key\":\"value\"`), not ordinary JSON. Keep the `ANIME_MARKER`-based `load` parser; Jsoup alone will not find episodes.
 - `loadLinks` tries Kodik directly (`POST /ftor`, Caesar + Base64 decode) and falls back to `loadExtractor` for other hosts. Return `true` only after a link was emitted.
